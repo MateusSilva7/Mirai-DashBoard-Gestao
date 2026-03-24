@@ -1,0 +1,207 @@
+input_module_ui <- function(id) {
+  ns <- NS(id)
+
+  tagList(
+    div(class = "wire-grid two-col",
+      div(class = "panel-card",
+        div(class = "panel-header",
+          div(class = "panel-kicker", "COLETA"),
+          h3(class = "panel-title", "Registrar atualização de KR"),
+          p(class = "panel-subtitle", "Preencha o formulário e atualize a ferramenta em tempo real.")
+        ),
+        div(class = "form-grid",
+          div(class = "field-block",
+            tags$label("Objetivo", `for` = ns("sel_objetivo"), class = "field-label"),
+            uiOutput(ns("objetivo_ui"))
+          ),
+          div(class = "field-block",
+            tags$label("Key Result", `for` = ns("sel_kr"), class = "field-label"),
+            uiOutput(ns("kr_ui"))
+          ),
+          div(class = "field-block",
+            tags$label("Período", `for` = ns("data_ref"), class = "field-label"),
+            dateInput(ns("data_ref"), NULL, value = Sys.Date(), width = "100%")
+          ),
+          div(class = "field-block",
+            tags$label("Responsável", `for` = ns("responsavel"), class = "field-label"),
+            textInput(ns("responsavel"), NULL, placeholder = "Ex.: Lucas Oliveira")
+          ),
+          div(class = "field-block",
+            tags$label("Valor realizado", `for` = ns("valor"), class = "field-label"),
+            numericInput(ns("valor"), NULL, value = NA, min = 0, step = 0.01, width = "100%")
+          ),
+          div(class = "field-block",
+            tags$label("Meta do período", `for` = ns("meta"), class = "field-label"),
+            numericInput(ns("meta"), NULL, value = NA, min = 0, step = 0.01, width = "100%")
+          ),
+          div(class = "field-block span-2",
+            tags$label("Diagnóstico do período", `for` = ns("diagnostico"), class = "field-label"),
+            textAreaInput(ns("diagnostico"), NULL, placeholder = "Resumo do que aconteceu no período.", rows = 4, width = "100%")
+          ),
+          div(class = "field-block span-2",
+            tags$label("Gargalos e riscos", `for` = ns("gargalos"), class = "field-label"),
+            textAreaInput(ns("gargalos"), NULL, placeholder = "Descreva os principais entraves.", rows = 3, width = "100%")
+          ),
+          div(class = "field-block span-2",
+            tags$label("Ações realizadas", `for` = ns("acoes_realizadas"), class = "field-label"),
+            textAreaInput(ns("acoes_realizadas"), NULL, placeholder = "Quais ações foram executadas?", rows = 3, width = "100%")
+          ),
+          div(class = "field-block span-2",
+            tags$label("Próximas ações", `for` = ns("proximas_acoes"), class = "field-label"),
+            textAreaInput(ns("proximas_acoes"), NULL, placeholder = "O que acontece no próximo ciclo?", rows = 3, width = "100%")
+          ),
+          div(class = "field-block",
+            tags$label("Confiança na meta", `for` = ns("confianca"), class = "field-label"),
+            sliderInput(ns("confianca"), NULL, min = 1, max = 5, value = 3, step = 1, width = "100%")
+          )
+        ),
+        div(class = "form-actions-row",
+          actionButton(ns("salvar"), "Salvar atualização", class = "btn-primary-mirai"),
+          actionButton(ns("limpar"), "Limpar campos", class = "btn-secondary-mirai")
+        ),
+        uiOutput(ns("feedback"))
+      ),
+      div(class = "stack-col",
+        div(class = "panel-card compact",
+          div(class = "panel-header",
+            div(class = "panel-kicker", "PRÉVIA"),
+            h3(class = "panel-title", "Resumo automático"),
+            p(class = "panel-subtitle", "A ferramenta calcula atingimento e status com base no input.")
+          ),
+          uiOutput(ns("preview_box"))
+        ),
+        div(class = "panel-card compact",
+          div(class = "panel-header",
+            div(class = "panel-kicker", "ÚLTIMOS INPUTS"),
+            h3(class = "panel-title", "Registros recentes"),
+            p(class = "panel-subtitle", "As últimas atualizações ficam disponíveis imediatamente no app.")
+          ),
+          uiOutput(ns("recent_table"))
+        )
+      )
+    )
+  )
+}
+
+input_module_server <- function(id, refresh_trigger) {
+  moduleServer(id, function(input, output, session) {
+    ns <- session$ns
+
+    objetivos <- reactive({ refresh_trigger(); get_objetivos() })
+    krs <- reactive({ refresh_trigger(); get_krs() })
+
+    output$objetivo_ui <- renderUI({
+      df <- objetivos()
+      selectInput(ns("sel_objetivo"), NULL,
+        choices = setNames(df$id_objetivo, paste(df$letra, df$nome, sep = " • ")),
+        selected = if (nrow(df) > 0) df$id_objetivo[1] else NULL,
+        width = "100%"
+      )
+    })
+
+    krs_filtrados <- reactive({
+      req(input$sel_objetivo)
+      df <- krs()
+      df[df$id_objetivo == as.integer(input$sel_objetivo), , drop = FALSE]
+    })
+
+    output$kr_ui <- renderUI({
+      df <- krs_filtrados()
+      selectInput(ns("sel_kr"), NULL,
+        choices = setNames(df$id_kr, df$nome),
+        selected = if (nrow(df) > 0) df$id_kr[1] else NULL,
+        width = "100%"
+      )
+    })
+
+    observeEvent(input$sel_kr, {
+      req(input$sel_kr)
+      kr_info <- krs()[krs()$id_kr == as.integer(input$sel_kr), , drop = FALSE]
+      if (nrow(kr_info) > 0) updateNumericInput(session, "meta", value = kr_info$meta[1])
+    }, ignoreInit = FALSE)
+
+    preview <- reactive({
+      req(input$valor, input$meta)
+      pct <- if (isTRUE(input$meta > 0)) round((input$valor / input$meta) * 100, 1) else 0
+      status <- if (pct >= 80) "verde" else if (pct >= 60) "amarelo" else "vermelho"
+      list(pct = pct, status = status)
+    })
+
+    output$preview_box <- renderUI({
+      if (is.null(input$valor) || is.na(input$valor) || is.null(input$meta) || is.na(input$meta)) {
+        return(div(class = "empty-mini", "Preencha valor e meta para visualizar a prévia."))
+      }
+      pv <- preview()
+      div(class = "preview-grid",
+        div(class = "preview-item",
+          div(class = "preview-label", "Valor realizado"),
+          div(class = "preview-value", format(input$valor, big.mark = ".", decimal.mark = ","))
+        ),
+        div(class = "preview-item",
+          div(class = "preview-label", "Meta"),
+          div(class = "preview-value", format(input$meta, big.mark = ".", decimal.mark = ","))
+        ),
+        div(class = "preview-item",
+          div(class = "preview-label", "Atingimento"),
+          div(class = paste("preview-value", pv$status), paste0(pv$pct, "%"))
+        ),
+        div(class = "preview-item",
+          div(class = "preview-label", "Status"),
+          div(class = paste("status-pill", pv$status), toupper(pv$status))
+        )
+      )
+    })
+
+    output$recent_table <- renderUI({
+      df <- refresh_trigger(); get_indicadores(limit = 6)
+      if (nrow(df) == 0) return(div(class = "empty-mini", "Sem registros recentes."))
+      tags$table(class = "table-clean",
+        tags$thead(tags$tr(tags$th("KR"), tags$th("Data"), tags$th("Realizado"), tags$th("Status"))),
+        tags$tbody(
+          lapply(seq_len(nrow(df)), function(i) {
+            row <- df[i, ]
+            tags$tr(
+              tags$td(row$nome_kr),
+              tags$td(format(as.Date(row$data), "%d/%m/%Y")),
+              tags$td(format(round(row$valor_realizado, 2), big.mark = ".", decimal.mark = ",")),
+              tags$td(span(class = paste("status-pill", row$status), row$status))
+            )
+          })
+        )
+      )
+    })
+
+    observeEvent(input$salvar, {
+      req(input$sel_kr, input$data_ref, input$valor, input$meta)
+      res <- insert_indicador(input$sel_kr, input$data_ref, input$valor, input$meta)
+      insert_qualitativo(
+        id_kr = input$sel_kr,
+        data = input$data_ref,
+        responsavel = input$responsavel,
+        diagnostico = input$diagnostico,
+        gargalos = input$gargalos,
+        acoes_realizadas = input$acoes_realizadas,
+        proximas_acoes = input$proximas_acoes,
+        confianca = input$confianca
+      )
+      refresh_trigger(Sys.time())
+      output$feedback <- renderUI({
+        div(class = "feedback-box ok",
+          icon("circle-check"),
+          sprintf("Registro salvo com sucesso. Atingimento calculado: %s%% | status: %s.", res$pct, res$status)
+        )
+      })
+    })
+
+    observeEvent(input$limpar, {
+      updateTextInput(session, "responsavel", value = "")
+      updateNumericInput(session, "valor", value = NA)
+      updateTextAreaInput(session, "diagnostico", value = "")
+      updateTextAreaInput(session, "gargalos", value = "")
+      updateTextAreaInput(session, "acoes_realizadas", value = "")
+      updateTextAreaInput(session, "proximas_acoes", value = "")
+      updateSliderInput(session, "confianca", value = 3)
+      output$feedback <- renderUI(NULL)
+    })
+  })
+}

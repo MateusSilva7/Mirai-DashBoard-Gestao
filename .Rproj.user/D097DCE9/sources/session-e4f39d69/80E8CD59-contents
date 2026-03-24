@@ -1,0 +1,347 @@
+# ============================================================
+# MIRAI OKR SYSTEM v2 — Database Module (CORRIGIDO)
+# Correções:
+#   - DB_PATH resolvido com here/normalizePath para robustez
+#   - Pasta data/ criada automaticamente se não existir
+#   - get_krs() retorna data.frame vazio ao invés de erro
+#   - insert_indicador() e insert_qualitativo() usam
+#     dbBind/DBI parametrizado (evita SQL injection e bugs de aspas)
+#   - Adicionado get_ultimo_status_por_objetivo() para o dashboard
+# ============================================================
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+
+# ── Caminho do Banco ─────────────────────────────────────────
+# Funciona tanto em runApp() quanto em deploy
+.db_path <- function() {
+  base <- tryCatch(
+    dirname(sys.frame(1)$ofile),   # path do script que chamou
+    error = function(e) getwd()
+  )
+  # Sobe até encontrar a pasta raiz do app (onde está app.R)
+  # ou usa o working directory corrente
+  data_dir <- file.path(getwd(), "data")
+  if (!dir.exists(data_dir)) dir.create(data_dir, recursive = TRUE)
+  file.path(data_dir, "mirai_okr.sqlite")
+}
+
+DB_PATH <- NULL  # será resolvido no init
+
+# ── Init ─────────────────────────────────────────────────────
+init_database <- function() {
+  # Garantir pasta data/ existe
+  data_dir <- file.path(getwd(), "data")
+  if (!dir.exists(data_dir)) dir.create(data_dir, recursive = TRUE)
+  
+  DB_PATH <<- file.path(data_dir, "mirai_okr.sqlite")
+  
+  con <- dbConnect(SQLite(), DB_PATH)
+  on.exit(dbDisconnect(con))
+  
+  dbExecute(con, "PRAGMA foreign_keys = ON")
+  
+  # dim_objetivos
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS dim_objetivos (
+      id_objetivo INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome        TEXT NOT NULL,
+      descricao   TEXT,
+      letra       TEXT,
+      cor         TEXT DEFAULT '#3271FE'
+    )
+  ")
+  
+  # dim_krs
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS dim_krs (
+      id_kr       INTEGER PRIMARY KEY AUTOINCREMENT,
+      id_objetivo INTEGER NOT NULL,
+      nome        TEXT NOT NULL,
+      meta        REAL NOT NULL,
+      unidade     TEXT DEFAULT '%',
+      frequencia  TEXT DEFAULT 'Mensal',
+      FOREIGN KEY (id_objetivo) REFERENCES dim_objetivos(id_objetivo)
+    )
+  ")
+  
+  # fact_indicadores
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS fact_indicadores (
+      id_registro           INTEGER PRIMARY KEY AUTOINCREMENT,
+      id_kr                 INTEGER NOT NULL,
+      data                  TEXT NOT NULL,
+      valor_realizado       REAL NOT NULL,
+      meta                  REAL NOT NULL,
+      percentual_atingimento REAL,
+      status                TEXT,
+      FOREIGN KEY (id_kr) REFERENCES dim_krs(id_kr)
+    )
+  ")
+  
+  # fact_inputs_qualitativos
+  dbExecute(con, "
+    CREATE TABLE IF NOT EXISTS fact_inputs_qualitativos (
+      id_registro      INTEGER PRIMARY KEY AUTOINCREMENT,
+      id_kr            INTEGER NOT NULL,
+      data             TEXT NOT NULL,
+      responsavel      TEXT,
+      diagnostico      TEXT,
+      gargalos         TEXT,
+      acoes_realizadas TEXT,
+      proximas_acoes   TEXT,
+      confianca        INTEGER DEFAULT 3,
+      FOREIGN KEY (id_kr) REFERENCES dim_krs(id_kr)
+    )
+  ")
+  
+  seed_data(con)
+}
+
+# ── Seed ─────────────────────────────────────────────────────
+seed_data <- function(con) {
+  n <- dbGetQuery(con, "SELECT COUNT(*) as n FROM dim_objetivos")$n
+  if (n > 0L) return(invisible(NULL))
+  
+  objetivos <- data.frame(
+    nome = c(
+      "Maximizar a capacidade de gerar grande impacto nos nossos Clientes",
+      "Impulsionar o faturamento recorrente, sem nos endividar e nem deteriorar a margem",
+      "Robustecer nossa carteira com novos Clientes na oferta de SqaaS",
+      "Alavancar a experiência e a capacidade técnica dos talentos da MIRAI",
+      "Incorporar assets que suportam as ofertas e a produtividade do time MIRAI"
+    ),
+    descricao = c(
+      "Propósito — Geração de impacto real nos clientes através de SQaaS",
+      "Resultado — Crescimento financeiro sustentável e saudável",
+      "Resultado — Expansão da carteira de clientes SqaaS",
+      "Fundações — Desenvolvimento e retenção de talentos",
+      "Fundações — Construção de ativos estratégicos e produtividade"
+    ),
+    letra = c("M", "I", "R", "A", "I"),
+    cor   = c("#3271FE", "#1742AD", "#34C3D0", "#663B8E", "#FF9E62"),
+    stringsAsFactors = FALSE
+  )
+  dbAppendTable(con, "dim_objetivos", objetivos)
+  
+  krs <- data.frame(
+    id_objetivo = c(1L, 1L, 2L, 2L, 3L, 3L, 4L, 4L, 5L, 5L, 5L),
+    nome = c(
+      "Retorno ao Cliente (SQaaS) em até 12 meses",
+      "NPS nos Clientes",
+      "Faturamento bruto anual com EBITDA de 40%",
+      "PMR médio",
+      "Novos clientes de SqaaS",
+      "Renovação de contratos SqaaS",
+      "e-NPS do time",
+      "Turnover voluntário",
+      "Solução agêntica suportando etapas do método",
+      "Ofertas comerciais suportadas por soluções",
+      "Produtividade do time (índice composto)"
+    ),
+    meta = c(30, 80, 12000000, 45, 4, 100, 70, 10, 1, 3, 80),
+    unidade = c("%", "%", "R$", "dias", "clientes", "%", "pontos", "%", "solução", "ofertas", "%"),
+    frequencia = c("Trimestral","Mensal","Anual","Mensal","Trimestral","Semestral",
+                   "Trimestral","Semestral","Semestral","Anual","Mensal"),
+    stringsAsFactors = FALSE
+  )
+  dbAppendTable(con, "dim_krs", krs)
+  
+  # Dados de demonstração realistas
+  set.seed(42)
+  today <- Sys.Date()
+  
+  # Progressão diferente para cada KR, mostrando tendências variadas
+  progressoes <- list(
+    c(0.55, 0.62, 0.70, 0.78),   # KR1 – crescendo
+    c(0.72, 0.80, 0.85, 0.92),   # KR2 – bom
+    c(0.40, 0.45, 0.52, 0.58),   # KR3 – abaixo
+    c(0.65, 0.70, 0.75, 0.80),   # KR4 – crescendo
+    c(0.25, 0.25, 0.50, 0.50),   # KR5 – estagnado depois salto
+    c(0.80, 0.85, 0.90, 1.00),   # KR6 – no alvo
+    c(0.60, 0.65, 0.70, 0.72),   # KR7 – atenção
+    c(0.05, 0.06, 0.04, 0.08),   # KR8 – turnover (inverso, menor é melhor)
+    c(0.0,  0.0,  1.0,  1.0),    # KR9 – binário
+    c(0.33, 0.33, 0.67, 0.67),   # KR10
+    c(0.55, 0.60, 0.68, 0.72)    # KR11
+  )
+  
+  rows <- lapply(seq_along(progressoes), function(kr_id) {
+    meta_val <- krs$meta[kr_id]
+    prog     <- progressoes[[kr_id]]
+    dates    <- seq(today - 90, today, by = 30)[1:length(prog)]
+    
+    data.frame(
+      id_kr           = kr_id,
+      data            = as.character(dates),
+      valor_realizado = round(meta_val * prog, 2),
+      meta            = meta_val,
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  df <- do.call(rbind, rows)
+  df$percentual_atingimento <- round((df$valor_realizado / df$meta) * 100, 1)
+  
+  # KR8 (Turnover): meta é MÁXIMO — quanto menor, melhor → inverter lógica
+  df$percentual_atingimento[df$id_kr == 8L] <-
+    round((1 - (df$valor_realizado[df$id_kr == 8L] / df$meta[df$id_kr == 8L])) * 100, 1)
+  
+  df$status <- ifelse(df$percentual_atingimento >= 80, "verde",
+                      ifelse(df$percentual_atingimento >= 60, "amarelo", "vermelho"))
+  
+  dbAppendTable(con, "fact_indicadores", df)
+  
+  # Qualitativo de exemplo
+  qual <- data.frame(
+    id_kr            = c(3L, 7L),
+    data             = as.character(c(today - 15, today - 10)),
+    responsavel      = c("Ana Souza", "Carlos Lima"),
+    diagnostico      = c(
+      "Prospecção ativa iniciada. Pipeline com 8 leads qualificados, 2 em negociação avançada.",
+      "e-NPS estável porém abaixo da meta. Pesquisa indica sobrecarga operacional como principal gargalo."
+    ),
+    gargalos         = c(
+      "Ciclo de vendas longo (~90 dias). Falta de caso de uso documentado para o segmento-alvo.",
+      "Alta carga de trabalho sem contratação prevista para Q1."
+    ),
+    acoes_realizadas = c(
+      "Criados 2 cases de sucesso. Participação em 1 evento do setor.",
+      "Workshop de alinhamento realizado. Revisão de processos de onboarding."
+    ),
+    proximas_acoes   = c(
+      "Apresentar proposta para leads em negociação. Lançar campanha de outreach.",
+      "Implementar política de folga compensatória. Contratar 1 analista junior."
+    ),
+    confianca        = c(3L, 2L),
+    stringsAsFactors = FALSE
+  )
+  dbAppendTable(con, "fact_inputs_qualitativos", qual)
+}
+
+# ── Helpers ──────────────────────────────────────────────────
+get_con <- function() {
+  if (is.null(DB_PATH)) stop("Banco não inicializado. Chame init_database() primeiro.")
+  dbConnect(SQLite(), DB_PATH)
+}
+
+get_objetivos <- function() {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  dbGetQuery(con, "SELECT * FROM dim_objetivos ORDER BY id_objetivo")
+}
+
+get_krs <- function(id_objetivo = NULL) {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  if (is.null(id_objetivo)) {
+    dbGetQuery(con,
+      "SELECT k.*, o.nome as nome_objetivo, o.letra, o.cor
+       FROM dim_krs k
+       JOIN dim_objetivos o ON k.id_objetivo = o.id_objetivo
+       ORDER BY k.id_objetivo, k.id_kr")
+  } else {
+    dbGetQuery(con,
+      "SELECT k.*, o.nome as nome_objetivo, o.letra, o.cor
+       FROM dim_krs k
+       JOIN dim_objetivos o ON k.id_objetivo = o.id_objetivo
+       WHERE k.id_objetivo = ?
+       ORDER BY k.id_kr",
+      params = list(as.integer(id_objetivo)))
+  }
+}
+
+get_indicadores <- function(id_kr = NULL, limit = 200L) {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  if (is.null(id_kr)) {
+    dbGetQuery(con, sprintf(
+      "SELECT f.*, k.nome as nome_kr, k.unidade, k.id_objetivo,
+              o.nome as nome_objetivo, o.letra, o.cor
+       FROM fact_indicadores f
+       JOIN dim_krs k         ON f.id_kr       = k.id_kr
+       JOIN dim_objetivos o   ON k.id_objetivo  = o.id_objetivo
+       ORDER BY f.data DESC LIMIT %d", limit))
+  } else {
+    dbGetQuery(con,
+      "SELECT f.*, k.nome as nome_kr, k.unidade, k.id_objetivo,
+              o.nome as nome_objetivo, o.letra, o.cor
+       FROM fact_indicadores f
+       JOIN dim_krs k         ON f.id_kr       = k.id_kr
+       JOIN dim_objetivos o   ON k.id_objetivo  = o.id_objetivo
+       WHERE f.id_kr = ?
+       ORDER BY f.data ASC",
+      params = list(as.integer(id_kr)))
+  }
+}
+
+# Retorna último registro por KR (para cards de status)
+get_ultimo_status <- function() {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  dbGetQuery(con, "
+    SELECT k.id_kr, k.nome as nome_kr, k.meta, k.unidade, k.id_objetivo,
+           o.nome as nome_objetivo, o.letra, o.cor,
+           f.valor_realizado, f.percentual_atingimento, f.status, f.data
+    FROM dim_krs k
+    JOIN dim_objetivos o ON k.id_objetivo = o.id_objetivo
+    LEFT JOIN fact_indicadores f
+      ON f.id_registro = (
+           SELECT MAX(f2.id_registro)
+           FROM fact_indicadores f2
+           WHERE f2.id_kr = k.id_kr
+         )
+    ORDER BY k.id_objetivo, k.id_kr
+  ")
+}
+
+get_qualitativo <- function(id_kr = NULL) {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  if (is.null(id_kr)) {
+    dbGetQuery(con,
+      "SELECT q.*, k.nome as nome_kr
+       FROM fact_inputs_qualitativos q
+       JOIN dim_krs k ON q.id_kr = k.id_kr
+       ORDER BY q.data DESC LIMIT 50")
+  } else {
+    dbGetQuery(con,
+      "SELECT q.*, k.nome as nome_kr
+       FROM fact_inputs_qualitativos q
+       JOIN dim_krs k ON q.id_kr = k.id_kr
+       WHERE q.id_kr = ?
+       ORDER BY q.data DESC LIMIT 10",
+      params = list(as.integer(id_kr)))
+  }
+}
+
+insert_indicador <- function(id_kr, data, valor_realizado, meta) {
+  pct    <- round((valor_realizado / meta) * 100, 1)
+  status <- ifelse(pct >= 80, "verde", ifelse(pct >= 60, "amarelo", "vermelho"))
+  
+  con <- get_con(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+    "INSERT INTO fact_indicadores
+       (id_kr, data, valor_realizado, meta, percentual_atingimento, status)
+     VALUES (?, ?, ?, ?, ?, ?)",
+    params = list(as.integer(id_kr), as.character(data),
+                  as.numeric(valor_realizado), as.numeric(meta),
+                  pct, status))
+  
+  list(pct = pct, status = status)
+}
+
+insert_qualitativo <- function(id_kr, data, responsavel, diagnostico,
+                                gargalos, acoes_realizadas, proximas_acoes, confianca) {
+  con <- get_con(); on.exit(dbDisconnect(con))
+  dbExecute(con,
+    "INSERT INTO fact_inputs_qualitativos
+       (id_kr, data, responsavel, diagnostico, gargalos,
+        acoes_realizadas, proximas_acoes, confianca)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    params = list(as.integer(id_kr), as.character(data),
+                  as.character(responsavel %||% ""),
+                  as.character(diagnostico %||% ""),
+                  as.character(gargalos %||% ""),
+                  as.character(acoes_realizadas %||% ""),
+                  as.character(proximas_acoes %||% ""),
+                  as.integer(confianca)))
+}
+
+`%||%` <- function(a, b) if (!is.null(a) && !is.na(a) && a != "") a else b

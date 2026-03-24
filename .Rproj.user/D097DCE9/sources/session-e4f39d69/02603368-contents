@@ -1,0 +1,142 @@
+library(shiny)
+library(bslib)
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(plotly)
+
+source("modules/database.R")
+source("modules/input_module.R")
+source("modules/dashboard_module.R")
+
+init_database()
+
+ui <- fluidPage(
+  tags$head(
+    tags$title("Mirai OKR System"),
+    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+    tags$link(rel = "stylesheet", href = "styles.css"),
+    tags$link(rel = "preconnect", href = "https://fonts.googleapis.com"),
+    tags$link(rel = "preconnect", href = "https://fonts.gstatic.com", crossorigin = ""),
+    tags$link(
+      href = "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap",
+      rel = "stylesheet"
+    ),
+    tags$script(HTML("
+      Shiny.addCustomMessageHandler('active_nav', function(page) {
+        ['dashboard','input','registros'].forEach(function(id) {
+          var el = document.getElementById('nav_' + id + '_wrap');
+          if (el) el.classList.remove('active');
+        });
+        var tgt = document.getElementById('nav_' + page + '_wrap');
+        if (tgt) tgt.classList.add('active');
+      });
+    ")),
+  ),
+  div(class = "app-shell",
+    div(class = "sidebar-shell",
+      div(class = "sidebar-brand",
+        tags$img(src = "mirai-logo.svg", class = "brand-logo", alt = "Mirai"),
+        div(class = "brand-subtitle", "OKR System")
+      ),
+      div(class = "sidebar-menu-label", "NAVEGAÇÃO"),
+      actionLink("go_dashboard",
+        div(id = "nav_dashboard_wrap", class = "nav-item active",
+          span(class = "nav-badge", icon("chart-simple")),
+          span("Dashboard")
+        )
+      ),
+      actionLink("go_input",
+        div(id = "nav_input_wrap", class = "nav-item",
+          span(class = "nav-badge", icon("square-plus")),
+          span("Coletar Dados")
+        )
+      ),
+      actionLink("go_registros",
+        div(id = "nav_registros_wrap", class = "nav-item",
+          span(class = "nav-badge", icon("table-list")),
+          span("Registros")
+        )
+      ),
+      div(class = "sidebar-insight",
+        div(class = "insight-label", "Objetivos monitorados"),
+        div(class = "insight-value", textOutput("sidebar_obj_count", inline = TRUE)),
+        div(class = "insight-label", style = "margin-top:14px;", "Key results"),
+        div(class = "insight-value", textOutput("sidebar_kr_count", inline = TRUE))
+      ),
+      div(class = "sidebar-footer-note", "Soluções com impacto real")
+    ),
+    div(class = "main-shell",
+      div(class = "topbar-shell",
+        div(
+          h1(class = "page-title", textOutput("page_title", inline = TRUE)),
+          div(class = "page-subtitle", textOutput("page_subtitle", inline = TRUE))
+        ),
+        div(class = "topbar-user",
+          div(class = "user-avatar", "M"),
+          div(
+            div(class = "user-name", "Mirai Leadership"),
+            div(class = "user-role", "Painel executivo")
+          )
+        )
+      ),
+      div(id = "main_content", class = "content-shell",
+        uiOutput("page_content")
+      )
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  current_page <- reactiveVal("dashboard")
+  refresh_trigger <- reactiveVal(Sys.time())
+
+  objetivos_df <- reactive({ refresh_trigger(); get_objetivos() })
+  krs_df <- reactive({ refresh_trigger(); get_krs() })
+
+  output$sidebar_obj_count <- renderText(nrow(objetivos_df()))
+  output$sidebar_kr_count <- renderText(nrow(krs_df()))
+
+  set_page <- function(page) {
+    current_page(page)
+    session$sendCustomMessage("active_nav", page)
+  }
+
+  observeEvent(input$go_dashboard, set_page("dashboard"))
+  observeEvent(input$go_input, set_page("input"))
+  observeEvent(input$go_registros, set_page("registros"))
+
+  output$page_title <- renderText({
+    switch(current_page(), dashboard = "Dashboard", input = "Coletar Dados", registros = "Registros")
+  })
+  output$page_subtitle <- renderText({
+    switch(current_page(),
+      dashboard = "Monitoramento executivo dos OKRs da Mirai.",
+      input = "Formulário integrado para alimentar a base e o BI.",
+      registros = "Histórico operacional e dados recentes."
+    )
+  })
+
+  output$page_content <- renderUI({
+    switch(current_page(),
+      dashboard = dashboard_module_ui("dash"),
+      input = input_module_ui("inp"),
+      registros = dashboard_records_ui("records")
+    )
+  })
+
+  dashboard_module_server("dash", refresh_trigger)
+  input_module_server("inp", refresh_trigger)
+  dashboard_records_server("records", refresh_trigger)
+
+  observe({
+    invalidateLater(60000, session)
+    refresh_trigger(Sys.time())
+  })
+
+  session$onFlushed(function() {
+    session$sendCustomMessage("active_nav", "dashboard")
+  }, once = TRUE)
+}
+
+shinyApp(ui, server)
