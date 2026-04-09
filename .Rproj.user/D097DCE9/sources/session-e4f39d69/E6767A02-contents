@@ -1,8 +1,0 @@
-
-body {font-family: 'Manrope'; background:#f5f7fb;}
-.sidebar {width:220px;position:fixed;height:100%;background:#1B1B1C;color:white;padding:20px;}
-.main {margin-left:240px;padding:20px;}
-.topbar {font-size:22px;font-weight:700;margin-bottom:20px;}
-.kpis {display:flex;gap:20px;}
-.kpi {background:white;padding:20px;border-radius:10px;}
-.login-box {max-width:300px;margin:100px auto;background:white;padding:20px;border-radius:10px;}

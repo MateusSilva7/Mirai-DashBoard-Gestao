@@ -1,0 +1,12 @@
+name: Mirai-DashBoard-Gestao
+title: Mirai-DashBoard-Gestao
+username: mateussilva
+account: mateussilva
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17093061
+bundleId: 11828164
+url: https://mateussilva.shinyapps.io/Mirai-DashBoard-Gestao/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
